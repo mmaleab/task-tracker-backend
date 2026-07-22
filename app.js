@@ -1,14 +1,14 @@
-require('dotenv').config(); // load variables from .env file
+require('dotenv').config();
 const express = require('express');
-const cors = require('cors'); // allows the frontend (different port) to talk to this backend
-const bcrypt = require('bcrypt'); // used to hash and check passwords
-const jwt = require('jsonwebtoken'); // used to create login tokens
+const cors = require('cors');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
 const pool = require('./db');
-const authMiddleware = require('./authMiddleware'); // checks for a valid token
+const authMiddleware = require('./authMiddleware');
 
 const app = express();
-app.use(cors()); // enable CORS for all routes
-app.use(express.json()); // allows the app to read JSON sent in requests
+app.use(cors());
+app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
@@ -19,17 +19,12 @@ app.get('/', (req, res) => {
 // SIGNUP: create a new user account
 app.post('/signup', async (req, res) => {
   const { email, password } = req.body;
-
   try {
-    const hashedPassword = await bcrypt.hash(password, 10); // scramble password before saving
-
+    const hashedPassword = await bcrypt.hash(password, 10);
     const result = await pool.query(
-      `INSERT INTO users (email, password_hash)
-       VALUES ($1, $2)
-       RETURNING id, email`, // never return the password
+      `INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email`,
       [email, hashedPassword]
     );
-
     res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error(err);
@@ -40,36 +35,21 @@ app.post('/signup', async (req, res) => {
 // LOGIN: check email + password, then give back a token
 app.post('/login', async (req, res) => {
   const { email, password } = req.body;
-
   try {
-    // step 1: find the user by email
-    const result = await pool.query(
-      'SELECT * FROM users WHERE email = $1',
-      [email]
-    );
-
-    // no user with that email
+    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
     if (result.rows.length === 0) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
-
     const user = result.rows[0];
-
-    // step 2: check password against the saved hash
     const passwordMatch = await bcrypt.compare(password, user.password_hash);
-
-    // wrong password (same generic error as above, on purpose)
     if (!passwordMatch) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
-
-    // step 3: create a token proving this user is logged in
     const token = jwt.sign(
-      { userId: user.id, email: user.email }, // data stored inside the token
-      process.env.JWT_SECRET, // secret key used to sign the token
-      { expiresIn: '2h' } // token expires after 2 hours
+      { userId: user.id, email: user.email },
+      process.env.JWT_SECRET,
+      { expiresIn: '2h' }
     );
-
     res.json({ message: 'Login successful', token });
   } catch (err) {
     console.error(err);
@@ -89,15 +69,25 @@ app.get('/tasks', authMiddleware, async (req, res) => {
   }
 });
 
-// Helper function to safely format dates to YYYY-MM-DD
+// Helper: Format MM/DD/YYYY to YYYY-MM-DD
 const parseToISODate = (dateStr) => {
   if (!dateStr || dateStr.trim() === '') return null;
-  const parsed = new Date(dateStr);
-  if (isNaN(parsed.getTime())) return dateStr; // fallback to raw input if invalid
-  return parsed.toISOString().split('T')[0];
+  const cleanDate = dateStr.trim();
+  const parts = cleanDate.split('/');
+  if (parts.length === 3) {
+    const month = parts[0].padStart(2, '0');
+    const day = parts[1].padStart(2, '0');
+    const year = parts[2];
+    return `${year}-${month}-${day}`;
+  }
+  const parsed = new Date(cleanDate);
+  if (!isNaN(parsed.getTime())) {
+    return parsed.toISOString().split('T')[0];
+  }
+  return cleanDate;
 };
 
-// Helper function to safely format 12h/24h time to HH:MM:SS
+// Helper: Format 12h/24h time to HH:MM:SS
 const parseTo24HourTime = (timeStr) => {
   if (!timeStr || timeStr.trim() === '') return null;
   const cleanTime = timeStr.trim();
@@ -118,7 +108,7 @@ const parseTo24HourTime = (timeStr) => {
   return cleanTime;
 };
 
-// CREATE TASK: handles empty inputs & parses date/time for PostgreSQL
+// CREATE TASK: handles empty inputs & formats date/time
 app.post('/tasks', authMiddleware, async (req, res) => {
   const { title, description, due_date, due_time } = req.body;
   const user_id = req.user.userId;
@@ -129,8 +119,8 @@ app.post('/tasks', authMiddleware, async (req, res) => {
 
   try {
     const result = await pool.query(
-      `INSERT INTO tasks (title, description, due_date, due_time, user_id)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO tasks (title, description, due_date, due_time, user_id, is_completed)
+       VALUES ($1, $2, $3, $4, $5, false)
        RETURNING *`,
       [title, formattedDesc, formattedDate, formattedTime, user_id]
     );
@@ -141,7 +131,7 @@ app.post('/tasks', authMiddleware, async (req, res) => {
   }
 });
 
-// UPDATE TASK
+// UPDATE TASK: updates task details and completion status
 app.put('/tasks/:id', authMiddleware, async (req, res) => {
   const { id } = req.params;
   const { title, description, due_date, due_time, is_completed } = req.body;
@@ -150,6 +140,7 @@ app.put('/tasks/:id', authMiddleware, async (req, res) => {
   const formattedDate = parseToISODate(due_date);
   const formattedTime = parseTo24HourTime(due_time);
   const formattedDesc = description && description.trim() !== '' ? description : null;
+  const completedStatus = is_completed === true || is_completed === 'true';
 
   try {
     const result = await pool.query(
@@ -157,7 +148,7 @@ app.put('/tasks/:id', authMiddleware, async (req, res) => {
        SET title = $1, description = $2, due_date = $3, due_time = $4, is_completed = $5
        WHERE id = $6 AND user_id = $7
        RETURNING *`,
-      [title, formattedDesc, formattedDate, formattedTime, is_completed, id, user_id]
+      [title, formattedDesc, formattedDate, formattedTime, completedStatus, id, user_id]
     );
 
     if (result.rows.length === 0) {
@@ -195,7 +186,7 @@ app.delete('/tasks/:id', authMiddleware, async (req, res) => {
 
 // ARCHIVE: Move current week's tasks to archived_tasks table
 app.post('/tasks/archive', authMiddleware, async (req, res) => {
-  const { week_start_date } = req.body; // e.g. "2026-07-19"
+  const { week_start_date } = req.body;
   const user_id = req.user.userId;
 
   if (!week_start_date) {
@@ -261,7 +252,7 @@ app.get('/dashboard/summary', authMiddleware, async (req, res) => {
   }
 });
 
-// start the server (must always be last)
+// start the server
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
 });
