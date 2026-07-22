@@ -89,35 +89,43 @@ app.get('/tasks', authMiddleware, async (req, res) => {
   }
 });
 
-// CREATE TASK: handles empty inputs & formats time (12h to 24h) for PostgreSQL
+// Helper function to safely format dates to YYYY-MM-DD
+const parseToISODate = (dateStr) => {
+  if (!dateStr || dateStr.trim() === '') return null;
+  const parsed = new Date(dateStr);
+  if (isNaN(parsed.getTime())) return dateStr; // fallback to raw input if invalid
+  return parsed.toISOString().split('T')[0];
+};
+
+// Helper function to safely format 12h/24h time to HH:MM:SS
+const parseTo24HourTime = (timeStr) => {
+  if (!timeStr || timeStr.trim() === '') return null;
+  const cleanTime = timeStr.trim();
+  const timeRegex = /^(\d{1,2}):(\d{2})\s*(AM|PM)?$/i;
+  const match = cleanTime.match(timeRegex);
+
+  if (match) {
+    let hours = parseInt(match[1], 10);
+    const minutes = match[2];
+    const modifier = match[3];
+
+    if (modifier) {
+      if (modifier.toUpperCase() === 'PM' && hours < 12) hours += 12;
+      if (modifier.toUpperCase() === 'AM' && hours === 12) hours = 0;
+    }
+    return `${hours.toString().padStart(2, '0')}:${minutes}:00`;
+  }
+  return cleanTime;
+};
+
+// CREATE TASK: handles empty inputs & parses date/time for PostgreSQL
 app.post('/tasks', authMiddleware, async (req, res) => {
   const { title, description, due_date, due_time } = req.body;
   const user_id = req.user.userId;
 
-  // 1. Format date and description
-  const formattedDate = due_date && due_date.trim() !== '' ? due_date : null;
+  const formattedDate = parseToISODate(due_date);
+  const formattedTime = parseTo24HourTime(due_time);
   const formattedDesc = description && description.trim() !== '' ? description : null;
-
-  // 2. Format time from 12h (e.g. "10:59 PM") to 24h (e.g. "22:59:00")
-  let formattedTime = null;
-  if (due_time && due_time.trim() !== '') {
-    const timeRegex = /^(\d{1,2}):(\d{2})\s*(AM|PM)?$/i;
-    const match = due_time.trim().match(timeRegex);
-
-    if (match) {
-      let hours = parseInt(match[1], 10);
-      const minutes = match[2];
-      const modifier = match[3];
-
-      if (modifier) {
-        if (modifier.toUpperCase() === 'PM' && hours < 12) hours += 12;
-        if (modifier.toUpperCase() === 'AM' && hours === 12) hours = 0;
-      }
-      formattedTime = `${hours.toString().padStart(2, '0')}:${minutes}:00`;
-    } else {
-      formattedTime = due_time;
-    }
-  }
 
   try {
     const result = await pool.query(
@@ -129,7 +137,7 @@ app.post('/tasks', authMiddleware, async (req, res) => {
     res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error('Error creating task:', err);
-    res.status(500).json({ error: 'Something went wrong creating the task' });
+    res.status(500).json({ error: 'Something went wrong creating the task', detail: err.message });
   }
 });
 
@@ -139,28 +147,9 @@ app.put('/tasks/:id', authMiddleware, async (req, res) => {
   const { title, description, due_date, due_time, is_completed } = req.body;
   const user_id = req.user.userId;
 
-  const formattedDate = due_date && due_date.trim() !== '' ? due_date : null;
+  const formattedDate = parseToISODate(due_date);
+  const formattedTime = parseTo24HourTime(due_time);
   const formattedDesc = description && description.trim() !== '' ? description : null;
-
-  let formattedTime = null;
-  if (due_time && due_time.trim() !== '') {
-    const timeRegex = /^(\d{1,2}):(\d{2})\s*(AM|PM)?$/i;
-    const match = due_time.trim().match(timeRegex);
-
-    if (match) {
-      let hours = parseInt(match[1], 10);
-      const minutes = match[2];
-      const modifier = match[3];
-
-      if (modifier) {
-        if (modifier.toUpperCase() === 'PM' && hours < 12) hours += 12;
-        if (modifier.toUpperCase() === 'AM' && hours === 12) hours = 0;
-      }
-      formattedTime = `${hours.toString().padStart(2, '0')}:${minutes}:00`;
-    } else {
-      formattedTime = due_time;
-    }
-  }
 
   try {
     const result = await pool.query(
