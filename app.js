@@ -77,10 +77,11 @@ app.post('/login', async (req, res) => {
   }
 });
 
-// authMiddleware added below: only logged-in users (valid token) can reach these routes
+// GET TASKS: fetch tasks only for the logged-in user
 app.get('/tasks', authMiddleware, async (req, res) => {
+  const user_id = req.user.userId;
   try {
-    const result = await pool.query('SELECT * FROM tasks');
+    const result = await pool.query('SELECT * FROM tasks WHERE user_id = $1 ORDER BY id DESC', [user_id]);
     res.json(result.rows);
   } catch (err) {
     console.error(err);
@@ -88,35 +89,45 @@ app.get('/tasks', authMiddleware, async (req, res) => {
   }
 });
 
+// CREATE TASK: handles empty inputs by converting "" to null
 app.post('/tasks', authMiddleware, async (req, res) => {
   const { title, description, due_date, due_time } = req.body;
   const user_id = req.user.userId;
+
+  const formattedDate = due_date && due_date.trim() !== '' ? due_date : null;
+  const formattedTime = due_time && due_time.trim() !== '' ? due_time : null;
+  const formattedDesc = description && description.trim() !== '' ? description : null;
 
   try {
     const result = await pool.query(
       `INSERT INTO tasks (title, description, due_date, due_time, user_id)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING *`,
-      [title, description, due_date, due_time, user_id]
+      [title, formattedDesc, formattedDate, formattedTime, user_id]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
-    console.error(err);
+    console.error('Error creating task:', err);
     res.status(500).json({ error: 'Something went wrong creating the task' });
   }
 });
 
 app.put('/tasks/:id', authMiddleware, async (req, res) => {
-  const { id } = req.params; // id comes from the URL
+  const { id } = req.params;
   const { title, description, due_date, due_time, is_completed } = req.body;
+  const user_id = req.user.userId;
+
+  const formattedDate = due_date && due_date.trim() !== '' ? due_date : null;
+  const formattedTime = due_time && due_time.trim() !== '' ? due_time : null;
+  const formattedDesc = description && description.trim() !== '' ? description : null;
 
   try {
     const result = await pool.query(
       `UPDATE tasks
        SET title = $1, description = $2, due_date = $3, due_time = $4, is_completed = $5
-       WHERE id = $6
+       WHERE id = $6 AND user_id = $7
        RETURNING *`,
-      [title, description, due_date, due_time, is_completed, id]
+      [title, formattedDesc, formattedDate, formattedTime, is_completed, id, user_id]
     );
 
     if (result.rows.length === 0) {
@@ -132,11 +143,12 @@ app.put('/tasks/:id', authMiddleware, async (req, res) => {
 
 app.delete('/tasks/:id', authMiddleware, async (req, res) => {
   const { id } = req.params;
+  const user_id = req.user.userId;
 
   try {
     const result = await pool.query(
-      'DELETE FROM tasks WHERE id = $1 RETURNING *',
-      [id]
+      'DELETE FROM tasks WHERE id = $1 AND user_id = $2 RETURNING *',
+      [id, user_id]
     );
 
     if (result.rows.length === 0) {
@@ -153,19 +165,17 @@ app.delete('/tasks/:id', authMiddleware, async (req, res) => {
 // ARCHIVE: Move current week's tasks to archived_tasks table
 app.post('/tasks/archive', authMiddleware, async (req, res) => {
   const { week_start_date } = req.body; // e.g. "2026-07-19"
-  const user_id = req.user.userId; // extracted from JWT token via authMiddleware
+  const user_id = req.user.userId;
 
   if (!week_start_date) {
     return res.status(400).json({ error: 'week_start_date is required (YYYY-MM-DD)' });
   }
 
-  // Get a dedicated client connection from the pool to handle SQL transaction
   const client = await pool.connect();
 
   try {
-    await client.query('BEGIN'); // Start transaction
+    await client.query('BEGIN');
 
-    // Step 1: Copy tasks from 'tasks' to 'archived_tasks'
     const archiveQuery = `
       INSERT INTO archived_tasks (title, description, due_date, due_time, is_completed, week_start_date, user_id)
       SELECT title, description, due_date, due_time, is_completed, $1, user_id
@@ -174,22 +184,20 @@ app.post('/tasks/archive', authMiddleware, async (req, res) => {
     `;
     await client.query(archiveQuery, [week_start_date, user_id]);
 
-    // Step 2: Delete archived tasks from active 'tasks' table
     const deleteQuery = `DELETE FROM tasks WHERE user_id = $1;`;
     await client.query(deleteQuery, [user_id]);
 
-    await client.query('COMMIT'); // Confirm all changes in DB
+    await client.query('COMMIT');
 
     res.json({ message: 'Tasks archived successfully for the week!' });
   } catch (err) {
-    await client.query('ROLLBACK'); // Cancel changes if error occurs
+    await client.query('ROLLBACK');
     console.error(err);
     res.status(500).json({ error: 'Something went wrong archiving tasks' });
   } finally {
-    client.release(); // Return client back to pool
+    client.release();
   }
 });
-
 
 // DASHBOARD: Fetch archived tasks statistics grouped by week
 app.get('/dashboard/summary', authMiddleware, async (req, res) => {
