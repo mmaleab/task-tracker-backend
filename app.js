@@ -12,6 +12,13 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
+// Automatic migration: Ensure priority column exists in tasks table
+pool.query(`
+  ALTER TABLE tasks 
+  ADD COLUMN IF NOT EXISTS priority VARCHAR(10) DEFAULT 'medium' 
+  CHECK (priority IN ('high', 'medium', 'low'));
+`).catch(err => console.log('Priority column check info:', err.message));
+
 app.get('/', (req, res) => {
   res.send('Task Tracker API is running!');
 });
@@ -108,21 +115,22 @@ const parseTo24HourTime = (timeStr) => {
   return cleanTime;
 };
 
-// CREATE TASK: handles empty inputs & formats date/time
+// CREATE TASK: handles empty inputs & formats date/time + priority
 app.post('/tasks', authMiddleware, async (req, res) => {
-  const { title, description, due_date, due_time } = req.body;
+  const { title, description, due_date, due_time, priority } = req.body;
   const user_id = req.user.userId;
 
   const formattedDate = parseToISODate(due_date);
   const formattedTime = parseTo24HourTime(due_time);
   const formattedDesc = description && description.trim() !== '' ? description : null;
+  const taskPriority = ['high', 'medium', 'low'].includes(priority) ? priority : 'medium';
 
   try {
     const result = await pool.query(
-      `INSERT INTO tasks (title, description, due_date, due_time, user_id, is_completed)
-       VALUES ($1, $2, $3, $4, $5, false)
+      `INSERT INTO tasks (title, description, due_date, due_time, priority, user_id, is_completed)
+       VALUES ($1, $2, $3, $4, $5, $6, false)
        RETURNING *`,
-      [title, formattedDesc, formattedDate, formattedTime, user_id]
+      [title, formattedDesc, formattedDate, formattedTime, taskPriority, user_id]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -131,24 +139,25 @@ app.post('/tasks', authMiddleware, async (req, res) => {
   }
 });
 
-// UPDATE TASK: updates task details and completion status
+// UPDATE TASK: updates task details, completion status, and priority
 app.put('/tasks/:id', authMiddleware, async (req, res) => {
   const { id } = req.params;
-  const { title, description, due_date, due_time, is_completed } = req.body;
+  const { title, description, due_date, due_time, is_completed, priority } = req.body;
   const user_id = req.user.userId;
 
   const formattedDate = parseToISODate(due_date);
   const formattedTime = parseTo24HourTime(due_time);
   const formattedDesc = description && description.trim() !== '' ? description : null;
   const completedStatus = is_completed === true || is_completed === 'true';
+  const taskPriority = ['high', 'medium', 'low'].includes(priority) ? priority : 'medium';
 
   try {
     const result = await pool.query(
       `UPDATE tasks
-       SET title = $1, description = $2, due_date = $3, due_time = $4, is_completed = $5
-       WHERE id = $6 AND user_id = $7
+       SET title = $1, description = $2, due_date = $3, due_time = $4, is_completed = $5, priority = $6
+       WHERE id = $7 AND user_id = $8
        RETURNING *`,
-      [title, formattedDesc, formattedDate, formattedTime, completedStatus, id, user_id]
+      [title, formattedDesc, formattedDate, formattedTime, completedStatus, taskPriority, id, user_id]
     );
 
     if (result.rows.length === 0) {
