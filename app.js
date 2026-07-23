@@ -265,23 +265,44 @@ app.get('/dashboard/summary', authMiddleware, async (req, res) => {
   }
 });
 
-// DASHBOARD LIVE: Fetch live active tasks statistics directly from tasks table
+// DASHBOARD LIVE: Fetch live active tasks statistics, overdue tasks, and lists
 app.get('/dashboard/live', authMiddleware, async (req, res) => {
   const user_id = req.user.userId;
 
   try {
-    const query = `
+    const statsQuery = `
       SELECT 
         COUNT(*) AS total_active,
         COUNT(*) FILTER (WHERE is_completed = true) AS completed_active,
         COUNT(*) FILTER (WHERE is_completed = false) AS pending_active,
-        COUNT(*) FILTER (WHERE priority = 'high' AND is_completed = false) AS high_priority_pending
+        COUNT(*) FILTER (WHERE priority = 'high' AND is_completed = false) AS high_priority_pending,
+        COUNT(*) FILTER (
+          WHERE is_completed = false AND (
+            due_date < CURRENT_DATE OR 
+            (due_date = CURRENT_DATE AND due_time IS NOT NULL AND due_time < CURRENT_TIME)
+          )
+        ) AS overdue_active
       FROM tasks
       WHERE user_id = $1;
     `;
 
-    const result = await pool.query(query, [user_id]);
-    res.json(result.rows[0]);
+    const overdueTasksQuery = `
+      SELECT id, title, description, due_date, due_time, priority 
+      FROM tasks 
+      WHERE user_id = $1 AND is_completed = false AND (
+        due_date < CURRENT_DATE OR 
+        (due_date = CURRENT_DATE AND due_time IS NOT NULL AND due_time < CURRENT_TIME)
+      )
+      ORDER BY due_date ASC, due_time ASC;
+    `;
+
+    const statsResult = await pool.query(statsQuery, [user_id]);
+    const overdueResult = await pool.query(overdueTasksQuery, [user_id]);
+
+    res.json({
+      stats: statsResult.rows[0],
+      overdueTasks: overdueResult.rows
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Something went wrong fetching live dashboard metrics' });
