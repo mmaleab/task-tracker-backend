@@ -12,9 +12,13 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// Automatic migration: Ensure priority column exists in tasks table
+// Automatic migration: Ensure priority column exists in tasks and archived_tasks tables
 pool.query(`
   ALTER TABLE tasks 
+  ADD COLUMN IF NOT EXISTS priority VARCHAR(10) DEFAULT 'medium' 
+  CHECK (priority IN ('high', 'medium', 'low'));
+
+  ALTER TABLE archived_tasks 
   ADD COLUMN IF NOT EXISTS priority VARCHAR(10) DEFAULT 'medium' 
   CHECK (priority IN ('high', 'medium', 'low'));
 `).catch(err => console.log('Priority column check info:', err.message));
@@ -193,7 +197,7 @@ app.delete('/tasks/:id', authMiddleware, async (req, res) => {
   }
 });
 
-// ARCHIVE: Move current week's tasks to archived_tasks table
+// ARCHIVE: Move current week's tasks to archived_tasks table (including priority)
 app.post('/tasks/archive', authMiddleware, async (req, res) => {
   const { week_start_date } = req.body;
   const user_id = req.user.userId;
@@ -208,8 +212,8 @@ app.post('/tasks/archive', authMiddleware, async (req, res) => {
     await client.query('BEGIN');
 
     const archiveQuery = `
-      INSERT INTO archived_tasks (title, description, due_date, due_time, is_completed, week_start_date, user_id)
-      SELECT title, description, due_date, due_time, is_completed, $1, user_id
+      INSERT INTO archived_tasks (title, description, due_date, due_time, is_completed, priority, week_start_date, user_id)
+      SELECT title, description, due_date, due_time, is_completed, priority, $1, user_id
       FROM tasks
       WHERE user_id = $2;
     `;
