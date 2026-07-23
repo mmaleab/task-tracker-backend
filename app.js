@@ -265,6 +265,29 @@ app.get('/dashboard/summary', authMiddleware, async (req, res) => {
   }
 });
 
+// DASHBOARD LIVE: Fetch live active tasks statistics directly from tasks table
+app.get('/dashboard/live', authMiddleware, async (req, res) => {
+  const user_id = req.user.userId;
+
+  try {
+    const query = `
+      SELECT 
+        COUNT(*) AS total_active,
+        COUNT(*) FILTER (WHERE is_completed = true) AS completed_active,
+        COUNT(*) FILTER (WHERE is_completed = false) AS pending_active,
+        COUNT(*) FILTER (WHERE priority = 'high' AND is_completed = false) AS high_priority_pending
+      FROM tasks
+      WHERE user_id = $1;
+    `;
+
+    const result = await pool.query(query, [user_id]);
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong fetching live dashboard metrics' });
+  }
+});
+
 // start the server
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
