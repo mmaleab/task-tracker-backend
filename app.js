@@ -3,6 +3,8 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+const nodemailer = require('nodemailer');
 const pool = require('./db');
 const authMiddleware = require('./authMiddleware');
 
@@ -12,7 +14,18 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// Automatic migration: Ensure priority column exists in tasks and archived_tasks tables
+// إعداد خدمة إرسال الإيميلات عبر Nodemailer
+const transporter = nodemailer.createTransport({
+    host: process.env.EMAIL_HOST,
+    port: process.env.EMAIL_PORT,
+    secure: true, // استخدام SSL للبورت 465
+    auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS
+    }
+});
+
+// Automatic migration: Ensure priority and verification columns exist in tables
 pool.query(`
   ALTER TABLE tasks 
   ADD COLUMN IF NOT EXISTS priority VARCHAR(10) DEFAULT 'medium' 
@@ -21,29 +34,92 @@ pool.query(`
   ALTER TABLE archived_tasks 
   ADD COLUMN IF NOT EXISTS priority VARCHAR(10) DEFAULT 'medium' 
   CHECK (priority IN ('high', 'medium', 'low'));
-`).catch(err => console.log('Priority column check info:', err.message));
+
+  ALTER TABLE users 
+  ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT false,
+  ADD COLUMN IF NOT EXISTS verification_code VARCHAR(6),
+  ADD COLUMN IF NOT EXISTS verification_code_expires TIMESTAMP,
+  ADD COLUMN IF NOT EXISTS reset_password_token VARCHAR(100),
+  ADD COLUMN IF NOT EXISTS reset_password_expires TIMESTAMP;
+`).catch(err => console.log('Migration check info:', err.message));
 
 app.get('/', (req, res) => {
   res.send('Task Tracker API is running!');
 });
 
-// SIGNUP: create a new user account
+// ==========================================
+// AUTHENTICATION & SECURITY ROUTES
+// ==========================================
+
+// SIGNUP: create a new user account and send verification code
 app.post('/signup', async (req, res) => {
   const { email, password } = req.body;
   try {
+    const existingUser = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (existingUser.rows.length > 0) {
+      return res.status(400).json({ error: 'البريد الإلكتروني مستخدم مسبقاً' });
+    }
+
     const hashedPassword = await bcrypt.hash(password, 10);
+    const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const codeExpires = new Date(Date.now() + 10 * 60 * 1000); // صالح لمدة 10 دقائق
+
     const result = await pool.query(
-      `INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email`,
-      [email, hashedPassword]
+      `INSERT INTO users (email, password_hash, is_verified, verification_code, verification_code_expires) 
+       VALUES ($1, $2, false, $3, $4) RETURNING id, email`,
+      [email, hashedPassword, verificationCode, codeExpires]
     );
-    res.status(201).json(result.rows[0]);
+
+    // إرسال الإيميل برمز التحقق
+    await transporter.sendMail({
+      from: process.env.EMAIL_USER,
+      to: email,
+      subject: 'رمز التحقق لحسابك في Task Tracker',
+      text: `رمز التحقق الخاص بك هو: ${verificationCode}\nهذا الرمز صالح لمدة 10 دقائق.`
+    });
+
+    res.status(201).json({ 
+      message: 'تم إنشاء الحساب بنجاح. يرجى التحقق من بريدك الإلكتروني لإدخال رمز التفعيل.',
+      user: result.rows[0] 
+    });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Something went wrong creating the account' });
+    res.status(500).json({ error: 'حدث خطأ أثناء إنشاء الحساب' });
   }
 });
 
-// LOGIN: check email + password, then give back a token
+// VERIFY EMAIL: check the code sent to user's email
+app.post('/verify-email', async (req, res) => {
+  const { email, code } = req.body;
+  try {
+    const userResult = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: 'المستخدم غير موجود' });
+    }
+
+    const user = userResult.rows[0];
+
+    if (user.is_verified) {
+      return res.status(400).json({ error: 'الحساب مفعل مسبقاً' });
+    }
+
+    if (user.verification_code !== code || new Date() > new Date(user.verification_code_expires)) {
+      return res.status(400).json({ error: 'رمز التحقق غير صحيح أو انتهت صلاحيته' });
+    }
+
+    await pool.query(
+      'UPDATE users SET is_verified = true, verification_code = NULL, verification_code_expires = NULL WHERE email = $1',
+      [email]
+    );
+
+    res.status(200).json({ message: 'تم تفعيل الحساب بنجاح!' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'حدث خطأ في الخادم أثناء التحقق' });
+  }
+});
+
+// LOGIN: check email + password + verification status, then give back a token
 app.post('/login', async (req, res) => {
   const { email, password } = req.body;
   try {
@@ -52,10 +128,16 @@ app.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
     const user = result.rows[0];
+
+    if (!user.is_verified) {
+      return res.status(403).json({ error: 'الحساب غير مفعل. يرجى التحقق من بريدك الإلكتروني لتفعيل الحساب.' });
+    }
+
     const passwordMatch = await bcrypt.compare(password, user.password_hash);
     if (!passwordMatch) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
+
     const token = jwt.sign(
       { userId: user.id, email: user.email },
       process.env.JWT_SECRET,
@@ -67,6 +149,72 @@ app.post('/login', async (req, res) => {
     res.status(500).json({ error: 'Something went wrong logging in' });
   }
 });
+
+// FORGOT PASSWORD: generate reset token and send email
+app.post('/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  try {
+    const userResult = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: 'البريد الإلكتروني غير مسجل معنا' });
+    }
+
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    const tokenExpires = new Date(Date.now() + 15 * 60 * 1000); // صالح لـ 15 دقيقة
+
+    await pool.query(
+      'UPDATE users SET reset_password_token = $1, reset_password_expires = $2 WHERE email = $3',
+      [resetToken, tokenExpires, email]
+    );
+
+    const resetLink = `http://localhost:3000/reset-password.html?token=${resetToken}&email=${email}`;
+
+    await transporter.sendMail({
+      from: process.env.EMAIL_USER,
+      to: email,
+      subject: 'طلب استعادة كلمة المرور',
+      text: `لقد طلبت إعادة تعيين كلمة المرور لحسابك. استخدم هذا الرابط للمتابعة:\n${resetLink}\nالرابط صالح لمدة 15 دقيقة.`
+    });
+
+    res.status(200).json({ message: 'تم إرسال رابط استعادة كلمة المرور إلى بريدك الإلكتروني.' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'حدث خطأ أثناء معالجة طلب استعادة كلمة المرور' });
+  }
+});
+
+// RESET PASSWORD: update password using token
+app.post('/reset-password', async (req, res) => {
+  const { email, token, newPassword } = req.body;
+  try {
+    const userResult = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (userResult.rows.length === 0) {
+      return res.status(400).json({ error: 'بيانات غير صالحة' });
+    }
+
+    const user = userResult.rows[0];
+
+    if (user.reset_password_token !== token || new Date() > new Date(user.reset_password_expires)) {
+      return res.status(400).json({ error: 'رابط إعادة التعيين غير صالح أو انتهت صلاحيته' });
+    }
+
+    const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+
+    await pool.query(
+      'UPDATE users SET password_hash = $1, reset_password_token = NULL, reset_password_expires = NULL WHERE email = $2',
+      [hashedNewPassword, email]
+    );
+
+    res.status(200).json({ message: 'تم تحديث كلمة المرور بنجاح! يمكنك تسجيل الدخول الآن.' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'حدث خطأ أثناء تحديث كلمة المرور' });
+  }
+});
+
+// ==========================================
+// TASKS ROUTES
+// ==========================================
 
 // GET TASKS: fetch tasks only for the logged-in user
 app.get('/tasks', authMiddleware, async (req, res) => {
@@ -119,7 +267,7 @@ const parseTo24HourTime = (timeStr) => {
   return cleanTime;
 };
 
-// CREATE TASK: handles empty inputs & formats date/time + priority
+// CREATE TASK
 app.post('/tasks', authMiddleware, async (req, res) => {
   const { title, description, due_date, due_time, priority } = req.body;
   const user_id = req.user.userId;
@@ -143,7 +291,7 @@ app.post('/tasks', authMiddleware, async (req, res) => {
   }
 });
 
-// UPDATE TASK: updates task details, completion status, and priority
+// UPDATE TASK
 app.put('/tasks/:id', authMiddleware, async (req, res) => {
   const { id } = req.params;
   const { title, description, due_date, due_time, is_completed, priority } = req.body;
@@ -197,7 +345,7 @@ app.delete('/tasks/:id', authMiddleware, async (req, res) => {
   }
 });
 
-// ARCHIVE: Move current week's tasks to archived_tasks table (including priority)
+// ARCHIVE TASKS
 app.post('/tasks/archive', authMiddleware, async (req, res) => {
   const { week_start_date } = req.body;
   const user_id = req.user.userId;
@@ -234,7 +382,10 @@ app.post('/tasks/archive', authMiddleware, async (req, res) => {
   }
 });
 
-// DASHBOARD: Fetch archived tasks statistics grouped by week
+// ==========================================
+// DASHBOARD ROUTES
+// ==========================================
+
 app.get('/dashboard/summary', authMiddleware, async (req, res) => {
   const user_id = req.user.userId;
 
@@ -265,7 +416,6 @@ app.get('/dashboard/summary', authMiddleware, async (req, res) => {
   }
 });
 
-// DASHBOARD LIVE: Fetch live active tasks statistics, overdue tasks, and lists
 app.get('/dashboard/live', authMiddleware, async (req, res) => {
   const user_id = req.user.userId;
 
