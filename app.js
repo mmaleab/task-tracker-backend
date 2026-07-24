@@ -54,6 +54,8 @@ app.get('/', (req, res) => {
 // SIGNUP: create a new user account and send verification code
 app.post('/signup', async (req, res) => {
   const { email, password } = req.body;
+  let insertedUserId = null; // نتتبع الـ id لو احتجنا نحذفه لاحقاً
+
   try {
     const existingUser = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
     if (existingUser.rows.length > 0) {
@@ -70,13 +72,26 @@ app.post('/signup', async (req, res) => {
       [email, hashedPassword, verificationCode, codeExpires]
     );
 
-    // إرسال الإيميل برمز التحقق
-    await transporter.sendMail({
-      from: process.env.EMAIL_USER,
-      to: email,
-      subject: 'رمز التحقق لحسابك في Task Tracker',
-      text: `رمز التحقق الخاص بك هو: ${verificationCode}\nهذا الرمز صالح لمدة 10 دقائق.`
-    });
+    insertedUserId = result.rows[0].id;
+
+    // محاولة إرسال الإيميل بشكل منفصل، عشان لو فشلت نقدر نتراجع (rollback)
+    try {
+      await transporter.sendMail({
+        from: process.env.EMAIL_USER,
+        to: email,
+        subject: 'رمز التحقق لحسابك في Task Tracker',
+        text: `رمز التحقق الخاص بك هو: ${verificationCode}\nهذا الرمز صالح لمدة 10 دقائق.`
+      });
+    } catch (mailErr) {
+      console.error('Failed to send verification email:', mailErr.message);
+
+      // Rollback: نحذف المستخدم اللي انضاف عشان الإيميل ما يبقى محجوز بدون داعي
+      await pool.query('DELETE FROM users WHERE id = $1', [insertedUserId]);
+
+      return res.status(500).json({
+        error: 'تعذر إرسال رمز التحقق إلى بريدك الإلكتروني. تأكد من صحة البريد وحاول مرة أخرى.'
+      });
+    }
 
     res.status(201).json({ 
       message: 'تم إنشاء الحساب بنجاح. يرجى التحقق من بريدك الإلكتروني لإدخال رمز التفعيل.',
@@ -84,6 +99,16 @@ app.post('/signup', async (req, res) => {
     });
   } catch (err) {
     console.error(err);
+
+    // في حال حصل خطأ بعد الإدراج ولم يُلتقط بالـ catch الداخلي، نتأكد من التنظيف أيضاً
+    if (insertedUserId) {
+      try {
+        await pool.query('DELETE FROM users WHERE id = $1', [insertedUserId]);
+      } catch (cleanupErr) {
+        console.error('Cleanup failed:', cleanupErr.message);
+      }
+    }
+
     res.status(500).json({ error: 'حدث خطأ أثناء إنشاء الحساب' });
   }
 });
