@@ -4,7 +4,7 @@ const cors = require('cors');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
 const pool = require('./db');
 const authMiddleware = require('./authMiddleware');
 
@@ -14,17 +14,10 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// إعداد خدمة إرسال الإيميلات عبر Nodemailer
-const transporter = nodemailer.createTransport({
-    host: process.env.EMAIL_HOST,
-    port: process.env.EMAIL_PORT,
-    secure: true, // استخدام SSL للبورت 465
-    auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS
-    },
-    family: 4 // إجبار الاتصال عبر IPv4 لتفادي مشكلة ENETUNREACH على Render
-});
+// إعداد خدمة إرسال الإيميلات عبر Resend (بديل عن Nodemailer/SMTP)
+const resend = new Resend(process.env.RESEND_API_KEY);
+// إيميل الإرسال الافتراضي من Resend (يعمل بدون توثيق دومين خاص)
+const EMAIL_FROM = process.env.EMAIL_FROM || 'onboarding@resend.dev';
 
 // Automatic migration: Ensure priority and verification columns exist in tables
 pool.query(`
@@ -75,14 +68,18 @@ app.post('/signup', async (req, res) => {
 
     insertedUserId = result.rows[0].id;
 
-    // محاولة إرسال الإيميل بشكل منفصل، عشان لو فشلت نقدر نتراجع (rollback)
+    // محاولة إرسال الإيميل عبر Resend، لو فشلت نتراجع (rollback)
     try {
-      await transporter.sendMail({
-        from: process.env.EMAIL_USER,
+      const { error: resendError } = await resend.emails.send({
+        from: EMAIL_FROM,
         to: email,
         subject: 'رمز التحقق لحسابك في Task Tracker',
-        text: `رمز التحقق الخاص بك هو: ${verificationCode}\nهذا الرمز صالح لمدة 10 دقائق.`
+        html: `<p>رمز التحقق الخاص بك هو: <strong>${verificationCode}</strong></p><p>هذا الرمز صالح لمدة 10 دقائق.</p>`
       });
+
+      if (resendError) {
+        throw new Error(resendError.message || 'Resend API error');
+      }
     } catch (mailErr) {
       console.error('Failed to send verification email:', mailErr.message);
 
@@ -195,12 +192,17 @@ app.post('/forgot-password', async (req, res) => {
 
     const resetLink = `http://localhost:3000/reset-password.html?token=${resetToken}&email=${email}`;
 
-    await transporter.sendMail({
-      from: process.env.EMAIL_USER,
+    const { error: resendError } = await resend.emails.send({
+      from: EMAIL_FROM,
       to: email,
       subject: 'طلب استعادة كلمة المرور',
-      text: `لقد طلبت إعادة تعيين كلمة المرور لحسابك. استخدم هذا الرابط للمتابعة:\n${resetLink}\nالرابط صالح لمدة 15 دقيقة.`
+      html: `<p>لقد طلبت إعادة تعيين كلمة المرور لحسابك. استخدم هذا الرابط للمتابعة:</p><p><a href="${resetLink}">${resetLink}</a></p><p>الرابط صالح لمدة 15 دقيقة.</p>`
     });
+
+    if (resendError) {
+      console.error('Failed to send reset email:', resendError.message);
+      return res.status(500).json({ error: 'تعذر إرسال رابط استعادة كلمة المرور. حاول مرة أخرى.' });
+    }
 
     res.status(200).json({ message: 'تم إرسال رابط استعادة كلمة المرور إلى بريدك الإلكتروني.' });
   } catch (err) {
