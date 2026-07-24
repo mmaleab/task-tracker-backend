@@ -22,7 +22,8 @@ const transporter = nodemailer.createTransport({
     auth: {
         user: process.env.EMAIL_USER,
         pass: process.env.EMAIL_PASS
-    }
+    },
+    family: 4 // إجبار الاتصال عبر IPv4 لتفادي مشكلة ENETUNREACH على Render
 });
 
 // Automatic migration: Ensure priority and verification columns exist in tables
